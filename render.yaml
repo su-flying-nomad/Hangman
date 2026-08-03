@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: cinehang
+    env: go
+    plan: free
+    autoDeploy: true
+    buildCommand: go mod tidy && go build -o server .
+    startCommand: ./server

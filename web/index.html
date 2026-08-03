@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cinemang - Multiplayer Hangman</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="background-glow"></div>
+    <div class="noise"></div>
+
+    <main class="app-shell">
+      <section class="pane" id="lobbyPane">
+        <div class="hero-tag">Real-Time Multiplayer</div>
+        <h1>Cinemang</h1>
+        <p>
+          One room. One hidden movie. Infinite chaos. Invite friends with a link
+          or QR code and race to crack the title.
+        </p>
+
+        <div class="lobby-grid">
+          <article class="card">
+            <h3>Create Room</h3>
+            <label for="hostName">Your name</label>
+            <input id="hostName" type="text" maxlength="24" placeholder="Kavya" />
+            <button id="createRoomBtn" class="btn btn-primary">Create and Host</button>
+            <div id="roomCreated" class="hidden room-created">
+              <p class="note">Room is live:</p>
+              <h2 id="roomCode" class="room-code"></h2>
+              <p class="note">Share this link:</p>
+              <div class="share-row">
+                <input id="shareLink" readonly aria-label="Share link for the room" />
+                <button id="copyBtn" class="btn btn-ghost">Copy</button>
+              </div>
+              <canvas id="qr"></canvas>
+            </div>
+          </article>
+
+          <article class="card">
+            <h3>Join Room</h3>
+            <label for="joinName">Your name</label>
+            <input id="joinName" type="text" maxlength="24" placeholder="Rahul" />
+            <label for="joinRoom">Room code</label>
+            <input id="joinRoom" type="text" maxlength="8" placeholder="AB12CD" />
+            <button id="joinBtn" class="btn btn-secondary">Join and Play</button>
+          </article>
+        </div>
+      </section>
+
+      <section class="pane hidden" id="gamePane">
+        <header class="game-header">
+          <div>
+            <p class="note">Room</p>
+            <h2 id="liveRoomCode">-</h2>
+          </div>
+          <div>
+            <p class="note">Round</p>
+            <h2 id="liveRound">1 / 15</h2>
+          </div>
+          <div>
+            <p class="note">Time</p>
+            <h2 id="liveTimer">60s</h2>
+          </div>
+          <div>
+            <p class="note">Lives Left</p>
+            <h2 id="liveLives">8</h2>
+          </div>
+        </header>
+
+        <div class="event-tape" id="eventTape">Waiting for players...</div>
+
+        <section class="word-card">
+          <div id="maskedWord" class="masked-word">_ _ _ _</div>
+          <p class="note keyboard-hint">Use your physical keyboard (A-Z) to guess instantly.</p>
+          <div class="guessed-wrap">
+            <p class="note">Guessed Letters:</p>
+            <div id="guessedLetters" class="guessed-letters">None yet</div>
+          </div>
+        </section>
+
+        <section class="inner-grid">
+          <article class="scoreboard card">
+            <h3>Leaderboard</h3>
+            <ul id="scoreList"></ul>
+          </article>
+          <article class="card">
+            <h3>How to Win</h3>
+            <p>Every player guesses independently in 120-second rounds.</p>
+            <p>Earn +10 per correct letter, and +50 for cracking the title.</p>
+            <p><strong>Speed Matters:</strong> Points are halved if you take longer than 45 seconds!</p>
+            <p><strong>Penalty:</strong> Lose -5 points for every wrong guess.</p>
+          </article>
+        </section>
+      </section>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>
