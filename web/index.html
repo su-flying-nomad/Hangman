@@ -75,15 +75,20 @@
         </header>
 
         <div class="event-tape" id="eventTape">Waiting for players...</div>
-
         <section class="word-card">
-          <div id="maskedWord" class="masked-word">_ _ _ _</div>
-          <p class="note keyboard-hint">Use your physical keyboard (A-Z) to guess instantly.</p>
+          <div id="maskedWord" class="masked-word">_ _ _ _</div>     
           <div class="guessed-wrap">
             <p class="note">Guessed Letters:</p>
             <div id="guessedLetters" class="guessed-letters">None yet</div>
           </div>
+
+          <!-- NEW: Virtual Keyboard Container -->
+          <div id="virtualKeyboard" class="virtual-keyboard"></div>
+          
+          <p class="note keyboard-hint">You can also use your physical keyboard (A-Z).</p>
         </section>
+
+
 
         <section class="inner-grid">
           <article class="scoreboard card">
