@@ -97,6 +97,18 @@ function renderState(state) {
   }
 
   pendingGuess = false;
+    // --- NEW: Update Virtual Keyboard ---
+  const allKeys = document.querySelectorAll(".key-btn");
+  allKeys.forEach(btn => {
+    const char = btn.textContent;
+    // If the letter is in the guessed array, disable the button
+    if (state.guessed && state.guessed.includes(char)) {
+      btn.disabled = true;
+    } else {
+      btn.disabled = false;
+    }
+  });
+
 }
 
 function wsUrl(roomId, name) {
@@ -242,3 +254,27 @@ const maybeRoom = new URLSearchParams(location.search).get("room");
 if (maybeRoom) {
   joinRoom.value = maybeRoom.toUpperCase();
 }
+// --- Virtual Keyboard Setup ---
+const virtualKeyboard = document.querySelector("#virtualKeyboard");
+const qwertyLayout = ["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"];
+
+qwertyLayout.forEach(rowChars => {
+  const rowDiv = document.createElement("div");
+  rowDiv.className = "keyboard-row";
+  
+  for (const char of rowChars) {
+    const btn = document.createElement("button");
+    btn.textContent = char;
+    btn.className = "key-btn";
+    btn.id = `key-${char}`;
+    
+    // When a mobile user taps the button, send the guess
+    btn.addEventListener("click", () => {
+      sendGuess(char);
+    });
+    
+    rowDiv.appendChild(btn);
+  }
+  virtualKeyboard.appendChild(rowDiv);
+});
+
