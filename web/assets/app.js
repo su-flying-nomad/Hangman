@@ -21,14 +21,25 @@ const eventTape = document.querySelector("#eventTape");
 const maskedWord = document.querySelector("#maskedWord");
 const guessedLetters = document.querySelector("#guessedLetters");
 const scoreList = document.querySelector("#scoreList");
+const hostControls = document.querySelector("#hostControls");
+const startGameBtn = document.querySelector("#startGameBtn");
 
 let socket;
 let localState;
 let pendingGuess = false;
 let countdownInterval;
 
+let isToasting = false;
+let toastTimeout;
+
 function toast(msg) {
   eventTape.textContent = msg;
+  isToasting = true;
+  clearTimeout(toastTimeout);
+  toastTimeout = setTimeout(() => {
+    isToasting = false;
+    if (localState) renderState(localState);
+  }, 4000);
 }
 
 function renderState(state) {
@@ -37,30 +48,33 @@ function renderState(state) {
   
   clearInterval(countdownInterval);
 
-  if (state.isGameOver) {
+  if (!state.isStarted) {
+    liveRound.textContent = "Waiting";
+    liveTimer.textContent = "∞";
+    liveLives.textContent = "-";
+    maskedWord.textContent = "LOBBY";
+    
+    if (state.isHost) {
+      hostControls.classList.remove("hidden");
+      if (!isToasting) eventTape.textContent = "You are the host. Start when everyone is ready!";
+    } else {
+      hostControls.classList.add("hidden");
+      if (!isToasting) eventTape.textContent = "Waiting for the host to start the game...";
+    }
+  } else if (state.playerStatus === "game_over") {
+    hostControls.classList.add("hidden");
     liveRound.textContent = "Finished";
     liveTimer.textContent = "0s";
     liveLives.textContent = "-";
     maskedWord.textContent = "GAME OVER";
     maskedWord.style.color = "inherit";
     guessedLetters.textContent = "All rounds completed.";
-    eventTape.textContent = "The game has ended.";
-  } else if (state.round === 0) {
-    // NEW: Waiting state before enough players join
-    liveRound.textContent = "Waiting";
-    liveTimer.textContent = "∞";
-    liveLives.textContent = "-";
-    maskedWord.textContent = "WAITING FOR PLAYERS";
-    maskedWord.style.color = "inherit";
-    guessedLetters.textContent = "Game starts when someone else joins...";
-    eventTape.textContent = "Invite a friend with the link or room code!";
+    if (!isToasting) eventTape.textContent = "The game has ended for you. Waiting for others...";
   } else {
-    // Normal game loop
+    hostControls.classList.add("hidden");
     liveRound.textContent = `${state.round} / ${state.totalRounds}`;
     liveLives.textContent = String(state.maxWrong - state.wrongGuesses);
-    guessedLetters.textContent = state.guessed.length ? state.guessed.join(" ") : "None yet";
-    
-    // ... rest of the existing timer and rendering logic ...
+    guessedLetters.textContent = state.guessed && state.guessed.length ? state.guessed.join(" ") : "None yet";
 
     const updateTimer = () => {
       const now = Math.floor(Date.now() / 1000);
@@ -70,38 +84,24 @@ function renderState(state) {
     updateTimer(); 
     countdownInterval = setInterval(updateTimer, 1000);
 
-    if (state.playerStatus === "solved") {
-      maskedWord.textContent = state.answer;
-      maskedWord.style.color = "var(--ok)";
-      eventTape.textContent = "You cracked it! Waiting for others to finish...";
-    } else if (state.playerStatus === "failed") {
-      maskedWord.textContent = state.answer;
-      maskedWord.style.color = "var(--danger)";
-      eventTape.textContent = "Out of lives! Waiting for the next round...";
-    } else {
-      maskedWord.textContent = state.maskedWord;
-      maskedWord.style.color = "inherit";
-      eventTape.textContent = "Round in progress...";
-    }
+    maskedWord.textContent = state.maskedWord;
+    maskedWord.style.color = "inherit";
+    if (!isToasting) eventTape.textContent = "Guess the movie!";
   }
 
   scoreList.innerHTML = "";
   for (const p of state.players) {
     const li = document.createElement("li");
-    let icon = "";
-    if (p.status === "solved") icon = " ✅";
-    if (p.status === "failed") icon = " ❌";
-    
-    li.innerHTML = `<span>${p.name}${icon}</span><strong>${p.score}</strong>`;
+    let progress = p.status === "game_over" ? "(Done)" : `(R${p.round})`;
+    if (!state.isStarted) progress = "";
+    li.innerHTML = `<span>${p.name} ${progress}</span><strong>${p.score}</strong>`;
     scoreList.appendChild(li);
   }
 
-  pendingGuess = false;
-    // --- NEW: Update Virtual Keyboard ---
+  // Update Virtual Keyboard
   const allKeys = document.querySelectorAll(".key-btn");
   allKeys.forEach(btn => {
     const char = btn.textContent;
-    // If the letter is in the guessed array, disable the button
     if (state.guessed && state.guessed.includes(char)) {
       btn.disabled = true;
     } else {
@@ -109,6 +109,7 @@ function renderState(state) {
     }
   });
 
+  pendingGuess = false;
 }
 
 function wsUrl(roomId, name) {
@@ -146,7 +147,7 @@ function connect(roomId, name) {
 }
 
 function sendGuess(letter) {
-  if (!socket || socket.readyState !== WebSocket.OPEN || pendingGuess) {
+  if (!socket || socket.readyState !== WebSocket.OPEN || pendingGuess || localState?.playerStatus === "game_over") {
     return;
   }
 
@@ -170,10 +171,7 @@ async function createRoomAndJoin() {
     return;
   }
 
-  const res = await fetch("/api/rooms", {
-    method: "POST",
-  });
-
+  const res = await fetch("/api/rooms", { method: "POST" });
   if (!res.ok) {
     alert("Could not create room.");
     return;
@@ -187,11 +185,7 @@ async function createRoomAndJoin() {
   window.QRCode.toCanvas(
     qrCanvas,
     data.joinUrl,
-    {
-      width: 160,
-      margin: 1,
-      color: { dark: "#000000", light: "#ffffff" },
-    },
+    { width: 160, margin: 1, color: { dark: "#000000", light: "#ffffff" } },
     () => {},
   );
 
@@ -221,30 +215,28 @@ function joinExisting() {
 }
 
 copyBtn?.addEventListener("click", async () => {
-  if (!shareLink.value) {
-    return;
-  }
+  if (!shareLink.value) return;
   await navigator.clipboard.writeText(shareLink.value);
   copyBtn.textContent = "Copied";
-  setTimeout(() => {
-    copyBtn.textContent = "Copy";
-  }, 1000);
+  setTimeout(() => { copyBtn.textContent = "Copy"; }, 1000);
 });
 
 createRoomBtn.addEventListener("click", createRoomAndJoin);
 joinBtn.addEventListener("click", joinExisting);
 
+startGameBtn?.addEventListener("click", () => {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ type: "start_game" }));
+  }
+});
+
 window.addEventListener("keydown", (ev) => {
   const active = document.activeElement;
   const typingInInput = active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA");
-  if (typingInInput) {
-    return;
-  }
+  if (typingInInput) return;
 
   const key = ev.key.toUpperCase();
-  if (key.length !== 1 || key < "A" || key > "Z") {
-    return;
-  }
+  if (key.length !== 1 || key < "A" || key > "Z") return;
 
   ev.preventDefault();
   sendGuess(key);
@@ -254,6 +246,7 @@ const maybeRoom = new URLSearchParams(location.search).get("room");
 if (maybeRoom) {
   joinRoom.value = maybeRoom.toUpperCase();
 }
+
 // --- Virtual Keyboard Setup ---
 const virtualKeyboard = document.querySelector("#virtualKeyboard");
 const qwertyLayout = ["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"];
@@ -268,7 +261,6 @@ qwertyLayout.forEach(rowChars => {
     btn.className = "key-btn";
     btn.id = `key-${char}`;
     
-    // When a mobile user taps the button, send the guess
     btn.addEventListener("click", () => {
       sendGuess(char);
     });
@@ -277,4 +269,3 @@ qwertyLayout.forEach(rowChars => {
   }
   virtualKeyboard.appendChild(rowDiv);
 });
-
