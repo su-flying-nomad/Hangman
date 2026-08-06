@@ -21,7 +21,7 @@ const (
 	maxWrongGuesses = 8
 	roomIDLength    = 6
 	totalRounds     = 15
-	roundDuration   = 90 * time.Second
+	roundDuration   = 120 * time.Second
 )
 
 var upgrader = websocket.Upgrader{
@@ -38,15 +38,15 @@ type server struct {
 }
 
 type room struct {
-	id           string
-	movies       []string
-	currentRound int
-	roundEndTime time.Time
-	players      map[string]*player
-	clients      map[*client]bool
-	timer        *time.Timer
-	isGameOver   bool
-	mu           sync.Mutex
+	id         string
+	movies     []string
+	players    map[string]*player
+	clients    map[*client]bool
+	hostID     string
+	isStarted  bool
+	gameTicker *time.Ticker
+	stopTicker chan struct{}
+	mu         sync.Mutex
 }
 
 type player struct {
@@ -55,7 +55,9 @@ type player struct {
 	score        int
 	guessed      map[rune]bool
 	wrongGuesses int
-	status       string // "playing", "solved", "failed", "game_over"
+	status       string // "waiting", "playing", "game_over"
+	currentRound int
+	roundEndTime time.Time
 }
 
 type client struct {
@@ -78,6 +80,8 @@ type clientMessage struct {
 
 type roomState struct {
 	RoomID       string       `json:"roomId"`
+	IsHost       bool         `json:"isHost"`
+	IsStarted    bool         `json:"isStarted"`
 	Round        int          `json:"round"`
 	TotalRounds  int          `json:"totalRounds"`
 	RoundEndTime int64        `json:"roundEndTime"`
@@ -86,14 +90,13 @@ type roomState struct {
 	MaxWrong     int          `json:"maxWrong"`
 	Guessed      []string     `json:"guessed"`
 	PlayerStatus string       `json:"playerStatus"`
-	Answer       string       `json:"answer"`
 	Players      []playerData `json:"players"`
-	IsGameOver   bool         `json:"isGameOver"`
 }
 
 type playerData struct {
 	Name   string `json:"name"`
 	Score  int    `json:"score"`
+	Round  int    `json:"round"`
 	Status string `json:"status"`
 }
 
@@ -138,7 +141,6 @@ func (s *server) handleCreateRoom(w http.ResponseWriter, r *http.Request) {
 		movies:  make([]string, totalRounds),
 	}
 
-	// Pre-load random movies, but do NOT start the round yet!
 	perm := rand.Perm(len(moviePool))
 	for i := 0; i < totalRounds; i++ {
 		newRoom.movies[i] = moviePool[perm[i]]
@@ -209,36 +211,30 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rm.mu.Lock()
+	if len(rm.players) == 0 {
+		rm.hostID = cl.id
+	}
+
 	p := &player{
 		id:           cl.id,
 		name:         cl.name,
 		guessed:      make(map[rune]bool),
 		wrongGuesses: 0,
-		status:       "playing",
+		status:       "waiting",
 	}
 
-	if rm.isGameOver {
-		p.status = "game_over"
-	} else if rm.currentRound == 0 {
-		p.status = "waiting" // Mark as waiting if the game hasn't started
+	// If game already started, late joiners get dropped into Round 1
+	if rm.isStarted {
+		p.status = "playing"
+		p.currentRound = 1
+		p.roundEndTime = time.Now().Add(roundDuration)
 	}
 
 	rm.players[cl.id] = p
 	rm.clients[cl] = true
-
-	playerCount := len(rm.players)
-	currentRound := rm.currentRound
 	rm.mu.Unlock()
 
-	// Safely start the game when the second player joins
-	if currentRound == 0 && playerCount >= 2 {
-		rm.mu.Lock()
-		rm.startRound(1)          // Safely starts the timer
-		rm.broadcastStateLocked() // Forces all clients to see Round 1 immediately
-		rm.mu.Unlock()
-	} else {
-		rm.broadcastState() // Otherwise, just broadcast the waiting state
-	}
+	rm.broadcastState()
 
 	go cl.writeLoop()
 	cl.readLoop()
@@ -254,35 +250,93 @@ func (s *server) findRoom(roomID string) (*room, error) {
 	return rm, nil
 }
 
-func (r *room) startRound(roundNum int) {
-	if r.timer != nil {
-		r.timer.Stop()
-	}
+func (r *room) startGame(c *client) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	r.currentRound = roundNum
-	if r.currentRound > totalRounds {
-		r.isGameOver = true
-		for _, p := range r.players {
-			p.status = "game_over"
-		}
+	if r.isStarted || c.id != r.hostID {
 		return
 	}
 
-	r.roundEndTime = time.Now().Add(roundDuration)
-
+	r.isStarted = true
 	for _, p := range r.players {
+		p.status = "playing"
+		p.currentRound = 1
+		p.roundEndTime = time.Now().Add(roundDuration)
 		p.guessed = make(map[rune]bool)
 		p.wrongGuesses = 0
-		p.status = "playing"
 	}
 
-	// Auto-advance when the 60s timer expires
-	r.timer = time.AfterFunc(roundDuration, func() {
-		r.mu.Lock()
-		r.startRound(r.currentRound + 1)
+	r.gameTicker = time.NewTicker(1 * time.Second)
+	r.stopTicker = make(chan struct{})
+
+	go func() {
+		for {
+			select {
+			case <-r.gameTicker.C:
+				r.checkTimers()
+			case <-r.stopTicker:
+				return
+			}
+		}
+	}()
+
+	r.broadcastStateLocked()
+}
+
+func (r *room) checkTimers() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if !r.isStarted {
+		return
+	}
+
+	changed := false
+	activePlayers := 0
+
+	for _, p := range r.players {
+		if p.status == "playing" {
+			if time.Now().After(p.roundEndTime) {
+				answer := r.movies[p.currentRound-1]
+				msg := fmt.Sprintf("Time's up! The movie was %s.", answer)
+				r.advancePlayerLocked(p)
+				changed = true
+
+				for cl := range r.clients {
+					if cl.id == p.id {
+						select {
+						case cl.send <- outboundMessage{Type: "toast", Payload: map[string]string{"message": msg}}:
+						default:
+						}
+					}
+				}
+			} else {
+				activePlayers++
+			}
+		}
+	}
+
+	if activePlayers == 0 && r.gameTicker != nil {
+		r.gameTicker.Stop()
+		close(r.stopTicker)
+		r.gameTicker = nil
+	}
+
+	if changed {
 		r.broadcastStateLocked()
-		r.mu.Unlock()
-	})
+	}
+}
+
+func (r *room) advancePlayerLocked(p *player) {
+	p.currentRound++
+	if p.currentRound > totalRounds {
+		p.status = "game_over"
+	} else {
+		p.guessed = make(map[rune]bool)
+		p.wrongGuesses = 0
+		p.roundEndTime = time.Now().Add(roundDuration)
+	}
 }
 
 func (c *client) readLoop() {
@@ -301,6 +355,8 @@ func (c *client) readLoop() {
 		}
 
 		switch msg.Type {
+		case "start_game":
+			c.room.startGame(c)
 		case "guess":
 			if err := c.room.applyGuess(c, msg.Letter); err != nil {
 				c.send <- outboundMessage{Type: "toast", Payload: map[string]string{"message": err.Error()}}
@@ -341,7 +397,15 @@ func (c *client) cleanup() {
 	rm.mu.Lock()
 	delete(rm.clients, c)
 	delete(rm.players, c.id)
+
+	activePlayers := len(rm.players)
+	if activePlayers == 0 && rm.gameTicker != nil {
+		rm.gameTicker.Stop()
+		close(rm.stopTicker)
+		rm.gameTicker = nil
+	}
 	rm.mu.Unlock()
+	
 	rm.broadcastState()
 	_ = c.conn.Close()
 }
@@ -361,7 +425,7 @@ func (r *room) applyGuess(c *client, rawLetter string) error {
 	defer r.mu.Unlock()
 
 	p := r.players[c.id]
-	if p == nil || p.status != "playing" || r.isGameOver {
+	if p == nil || p.status != "playing" {
 		return nil
 	}
 
@@ -371,52 +435,25 @@ func (r *room) applyGuess(c *client, rawLetter string) error {
 	}
 
 	p.guessed[guessRune] = true
-	answer := r.movies[r.currentRound-1]
-
-	// Determine if more than 60 seconds have passed in the 120s round
-	timeRemaining := time.Until(r.roundEndTime)
-	isLate := timeRemaining < 45*time.Second
+	answer := r.movies[p.currentRound-1]
 
 	if strings.ContainsRune(strings.ToUpper(answer), guessRune) {
-		// Half points if guessing took more than 60 seconds
-		if isLate {
-			p.score += 5
-		} else {
-			p.score += 10
-		}
+		p.score += 10
 
 		masked := maskWord(answer, p.guessed)
 		if !strings.ContainsRune(masked, '_') {
-			p.status = "solved"
-			// Half bonus if solving took more than 60 seconds
-			if isLate {
-				p.score += 25
-			} else {
-				p.score += 50
-			}
+			p.score += 50
+			msg := fmt.Sprintf("Cracked! The movie was %s. Next round!", answer)
+			r.advancePlayerLocked(p)
+			c.send <- outboundMessage{Type: "toast", Payload: map[string]string{"message": msg}}
 		}
 	} else {
 		p.wrongGuesses++
-		p.score -= 5 // Penalty for wrong guess
 		if p.wrongGuesses >= maxWrongGuesses {
-			p.status = "failed"
+			msg := fmt.Sprintf("Out of lives! The movie was %s.", answer)
+			r.advancePlayerLocked(p)
+			c.send <- outboundMessage{Type: "toast", Payload: map[string]string{"message": msg}}
 		}
-	}
-
-	// Check if all players in the room are finished (solved or failed)
-	allDone := true
-	activePlayers := 0
-	for _, player := range r.players {
-		activePlayers++
-		if player.status == "playing" {
-			allDone = false
-			break
-		}
-	}
-
-	// If everyone is done early, instantly advance to the next round
-	if allDone && activePlayers > 0 {
-		r.startRound(r.currentRound + 1)
 	}
 
 	r.broadcastStateLocked()
@@ -434,6 +471,7 @@ func (r *room) snapshotFor(cl *client) roomState {
 		playersData = append(playersData, playerData{
 			Name:   player.name,
 			Score:  player.score,
+			Round:  player.currentRound,
 			Status: player.status,
 		})
 	}
@@ -445,36 +483,33 @@ func (r *room) snapshotFor(cl *client) roomState {
 	})
 
 	state := roomState{
-		RoomID:       r.id,
-		Round:        r.currentRound,
-		TotalRounds:  totalRounds,
-		RoundEndTime: r.roundEndTime.Unix(),
-		MaxWrong:     maxWrongGuesses,
-		Players:      playersData,
-		IsGameOver:   r.isGameOver,
+		RoomID:      r.id,
+		IsStarted:   r.isStarted,
+		TotalRounds: totalRounds,
+		MaxWrong:    maxWrongGuesses,
+		Players:     playersData,
 	}
 
-	if r.isGameOver || r.currentRound == 0 {
-		return state
+	if cl != nil {
+		state.IsHost = (cl.id == r.hostID)
 	}
 
-	answer := r.movies[r.currentRound-1]
-
-	if p != nil {
+	if p != nil && r.isStarted {
 		state.PlayerStatus = p.status
-		state.WrongGuesses = p.wrongGuesses
-		state.MaskedWord = maskWord(answer, p.guessed)
+		state.Round = p.currentRound
 
-		guessedLetters := make([]string, 0, len(p.guessed))
-		for k := range p.guessed {
-			guessedLetters = append(guessedLetters, string(k))
-		}
-		sort.Strings(guessedLetters)
-		state.Guessed = guessedLetters
+		if p.status == "playing" {
+			state.RoundEndTime = p.roundEndTime.Unix()
+			state.WrongGuesses = p.wrongGuesses
+			answer := r.movies[p.currentRound-1]
+			state.MaskedWord = maskWord(answer, p.guessed)
 
-		// Reveal the answer ONLY if they have finished the round
-		if p.status != "playing" {
-			state.Answer = answer
+			guessedLetters := make([]string, 0, len(p.guessed))
+			for k := range p.guessed {
+				guessedLetters = append(guessedLetters, string(k))
+			}
+			sort.Strings(guessedLetters)
+			state.Guessed = guessedLetters
 		}
 	}
 
@@ -536,6 +571,8 @@ func maskWord(word string, guessed map[rune]bool) string {
 			}
 		case unicode.IsDigit(ch):
 			b.WriteRune(ch)
+		case unicode.IsSpace(ch):
+			b.WriteRune('/') // Replaces space with a highly visible slash
 		default:
 			b.WriteRune(ch)
 		}
